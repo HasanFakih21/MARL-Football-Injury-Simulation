@@ -1,5 +1,7 @@
 # COMP4900 Project: Exploring Multi-Agent Coordination Under Physical Degradation in VMAS Football 
 
+Hasan Fakih (101168868)
+
 This repository contains modifications to [BenchMARL](https://github.com/facebookresearch/BenchMARL) and [VMAS](https://github.com/proroklab/VectorizedMultiAgentSimulator) to study how multi-agent reinforcement learning policies adapt to dynamic agent capability changes through an injury system.
 
 ## Overview

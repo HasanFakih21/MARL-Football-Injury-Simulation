@@ -1,0 +1,175 @@
+diff --git a/vmas/scenarios/football.py b/vmas/scenarios/football.py
+index cb085e5..506c7e3 100644
+--- a/vmas/scenarios/football.py
++++ b/vmas/scenarios/football.py
+@@ -1,3 +1,7 @@
++#  This file is a modified version of the VMAS football environment.
++#  Modifications include the addition of agent injuries that affect their speed and observation modes related to them.
++#  Modifications made by Hasan Fakih (2025). 
++
+ #  Copyright (c) ProrokLab.
+ #
+ #  This source code is licensed under the license found in the
+@@ -111,6 +115,17 @@ class Scenario(BaseScenario):
+         self.observe_adversaries = kwargs.pop("observe_adversaries", True)
+         self.dict_obs = kwargs.pop("dict_obs", False)
+ 
++        # Injuries
++        self.injury_probability = kwargs.pop(
++            "injury_probability", 0.0
++        )  # Probability that an agent gets injured at reset (0 to 1)
++        self.injury_speed_penalty = kwargs.pop(
++            "injury_speed_penalty", 0.5
++        )  # Multiplier for max_speed when injured (0 to 1, where 1 means no penalty)
++        self.injury_obs_mode = kwargs.pop(
++            "injury_obs_mode", "none"
++        )  # Observation mode: "none", "self", or "all"
++
+         if kwargs.pop("dense_reward_ratio", None) is not None:
+             raise ValueError(
+                 "dense_reward_ratio in football is deprecated, please use `dense_reward` "
+@@ -145,6 +160,14 @@ class Scenario(BaseScenario):
+         self.min_agent_dist_to_ball_blue = None
+         self.min_agent_dist_to_ball_red = None
+ 
++        # Injury tracking
++        self._injured_agents = torch.zeros(
++            batch_dim,
++            self.n_blue_agents + self.n_red_agents,
++            device=device,
++            dtype=torch.bool,
++        )
++
+         self._reset_agent_range = torch.tensor(
+             [self.pitch_length / 2, self.pitch_width],
+             device=device,
+@@ -385,7 +408,33 @@ class Scenario(BaseScenario):
+         agents = [attacker(0), attacker(1), defender(2), defender(3), goal_keeper(4)]
+         return agents
+ 
++    def apply_injuries(self, env_index: int = None):
++        #Apply random injuries to agents based on injury_probability.        
++        if self.injury_probability <= 0:
++            return
++
++        all_agents = self.blue_agents + self.red_agents
++        
++        if env_index is None:
++            # Apply injuries across all environments
++            for env_idx in range(self.world.batch_dim):
++                # Check if we should apply an injury in this environment
++                if torch.rand(1).item() < self.injury_probability:
++                    # Randomly select one agent to injure
++                    injured_idx = torch.randint(0, len(all_agents), (1,)).item()
++                    self._injured_agents[env_idx, injured_idx] = True
++        else:
++            # Apply injury only to specific environment
++            if torch.rand(1).item() < self.injury_probability:
++                injured_idx = torch.randint(0, len(all_agents), (1,)).item()
++                self._injured_agents[env_index, injured_idx] = True
++
+     def reset_agents(self, env_index: int = None):
++        # Reset injury status
++        if env_index is None:
++            self._injured_agents[:] = False
++        else:
++            self._injured_agents[env_index] = False
+ 
+         if self.spawn_in_formation:
+             self._spawn_formation(self.blue_agents, True, env_index)
+@@ -413,6 +462,9 @@ class Scenario(BaseScenario):
+                     ),
+                     batch_index=env_index,
+                 )
++        
++        # Apply injuries after positioning agents
++        self.apply_injuries(env_index)
+ 
+     def _spawn_formation(self, agents, blue, env_index):
+         if self.randomise_formation_indices:
+@@ -1050,6 +1102,16 @@ class Scenario(BaseScenario):
+     def process_action(self, agent: Agent):
+         if agent is self.ball:
+             return
++        
++        # Apply injury speed penalty by scaling actions for injured agents
++        all_agents = self.blue_agents + self.red_agents
++        if agent in all_agents:
++            agent_idx = all_agents.index(agent)
++            injured_mask = self._injured_agents[:, agent_idx]
++            if injured_mask.any():
++                # Scale down the action magnitude for injured agents
++                agent.action.u[injured_mask] *= self.injury_speed_penalty
++        
+         blue = agent in self.blue_agents
+         if agent.action_script is None and not blue:  # Non AI
+             agent.action.u[..., X] = -agent.action.u[
+@@ -1298,6 +1360,8 @@ class Scenario(BaseScenario):
+             if teammate_vels is None
+             else teammate_vels,
+             blue=blue,
++            agent=agent,
++            env_index=env_index,
+         )
+         return obs
+ 
+@@ -1318,6 +1382,8 @@ class Scenario(BaseScenario):
+         ball_force,
+         goal_pos,
+         blue: bool,
++        agent: Agent = None,
++        env_index = Ellipsis,
+     ):
+         # Make all inputs same batch size (this is needed when this function is called for rendering
+         input = [
+@@ -1452,6 +1518,24 @@ class Scenario(BaseScenario):
+                 else torch.cat(obs["teammates"], dim=-1)
+             ]
+ 
++        # Add injury observations based on observation mode
++        if self.injury_obs_mode != "none" and agent is not None:
++            all_agents = self.blue_agents + self.red_agents
++            agent_idx = all_agents.index(agent)
++            
++            if self.injury_obs_mode == "self":
++                # Only observe own injury status
++                injury_status = self._injured_agents[env_index, agent_idx].float()
++                if injury_status.dim() == 0:
++                    injury_status = injury_status.unsqueeze(0)
++                obs["injury"] = [injury_status.unsqueeze(-1)]
++            elif self.injury_obs_mode == "all":
++                # Observe all agents' injury status
++                injury_status = self._injured_agents[env_index].float()
++                if injury_status.dim() == 1:
++                    injury_status = injury_status.unsqueeze(0)
++                obs["injury"] = [injury_status]
++
+         for key, value in obs.items():
+             obs[key] = torch.cat(value, dim=-1)
+         if self.dict_obs:
+@@ -1530,6 +1614,25 @@ class Scenario(BaseScenario):
+             self, env_index, start_from=1, exclude=self.red_agents + [self.ball]
+         )
+ 
++        # Injury indicators
++        all_agents = self.blue_agents + self.red_agents
++        for i, agent in enumerate(all_agents):
++            if self._injured_agents[env_index, i]:
++                injury_marker = rendering.make_circle(radius=agent.shape.radius * 1.5, filled=False)
++                injury_marker.set_color(1.0, 0.0, 0.0)  # Red color
++                injury_marker.set_linewidth(3)
++                xform = rendering.Transform()
++                xform.set_translation(*agent.state.pos[env_index])
++                injury_marker.add_attr(xform)
++                geoms.append(injury_marker)
++                
++                injury_dot = rendering.make_circle(radius=agent.shape.radius * 0.3, filled=True)
++                injury_dot.set_color(1.0, 0.0, 0.0)
++                xform2 = rendering.Transform()
++                xform2.set_translation(*agent.state.pos[env_index])
++                injury_dot.add_attr(xform2)
++                geoms.append(injury_dot)
++
+         # Agent rotation and shooting
+         if self.enable_shooting:
+             for agent in self.blue_agents:
